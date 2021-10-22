@@ -15,6 +15,7 @@ import java.awt.event.ItemListener;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.util.Arrays;
+import java.util.stream.Collectors;
 
 import javax.swing.BorderFactory;
 import javax.swing.ButtonGroup;
@@ -415,6 +416,37 @@ public class SearchDialog extends ExtendedDialog {
                         tr("objects (and all its way nodes / relation members) in downloaded area")),
                 GBC.eol());
         }
+        if (options.expertMode) {
+            SearchKeywordRow row = new SearchKeywordRow(hcbSearchString)
+            .addTitle(tr("all simple  keywords"));
+
+            for (String keyword : SearchCompiler.simpleMatchFactoryMap.keySet().stream().sorted().collect(Collectors.toList())) {
+                row = row.addKeyword(keyword, keyword, "");
+            }
+
+            hintPanel.add(row, GBC.eol());
+        }
+        if (options.expertMode) {
+            SearchKeywordRow row = new SearchKeywordRow(hcbSearchString)
+            .addTitle(tr("all unary functions"));
+
+            for (String keyword : SearchCompiler.unaryMatchFactoryMap.keySet().stream().sorted().collect(Collectors.toList())) {
+                row = row.addKeyword(keyword + " <i>expr</i>", keyword, "");
+            }
+
+            hintPanel.add(row, GBC.eol());
+        }
+        if (options.expertMode) {
+            SearchKeywordRow row = new SearchKeywordRow(hcbSearchString)
+            .addTitle(tr("all binary functions"));
+
+            for (String keyword : SearchCompiler.binaryMatchFactoryMap.keySet().stream().sorted().collect(Collectors.toList())) {
+                row = row.addKeyword("<i>expr</i> " + keyword + " <i>expr</i>", keyword, "");
+            }
+
+            hintPanel.add(row, GBC.eol());
+        }
+
         if (options.overpassQuery) {
             hintPanel.add(new SearchKeywordRow(hcbSearchString)
                 .addTitle(tr("location"))

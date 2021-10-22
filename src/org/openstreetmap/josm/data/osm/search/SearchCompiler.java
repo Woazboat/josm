@@ -85,9 +85,9 @@ public class SearchCompiler {
     private static final String rxErrorMsg = marktr("The regex \"{0}\" had a parse error at offset {1}, full error:\n\n{2}");
     private static final String rxErrorMsgNoPos = marktr("The regex \"{0}\" had a parse error, full error:\n\n{1}");
     private final PushbackTokenizer tokenizer;
-    private static final Map<String, SimpleMatchFactory> simpleMatchFactoryMap = new HashMap<>();
-    private static final Map<String, UnaryMatchFactory> unaryMatchFactoryMap = new HashMap<>();
-    private static final Map<String, BinaryMatchFactory> binaryMatchFactoryMap = new HashMap<>();
+    public static final Map<String, SimpleMatchFactory> simpleMatchFactoryMap = new HashMap<>();
+    public static final Map<String, UnaryMatchFactory> unaryMatchFactoryMap = new HashMap<>();
+    public static final Map<String, BinaryMatchFactory> binaryMatchFactoryMap = new HashMap<>();
 
     static {
         addMatchFactory(new CoreSimpleMatchFactory());
