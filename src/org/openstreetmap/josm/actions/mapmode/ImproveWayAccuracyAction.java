@@ -22,6 +22,7 @@ import java.util.Set;
 
 import javax.swing.JOptionPane;
 
+import org.openstreetmap.josm.actions.UnGlueAction;
 import org.openstreetmap.josm.command.AddCommand;
 import org.openstreetmap.josm.command.ChangeNodesCommand;
 import org.openstreetmap.josm.command.Command;
@@ -56,6 +57,7 @@ import org.openstreetmap.josm.data.preferences.StrokeProperty;
 import org.openstreetmap.josm.gui.MainApplication;
 import org.openstreetmap.josm.gui.MapFrame;
 import org.openstreetmap.josm.gui.MapView;
+import org.openstreetmap.josm.gui.Notification;
 import org.openstreetmap.josm.gui.draw.MapViewPath;
 import org.openstreetmap.josm.gui.draw.SymbolShape;
 import org.openstreetmap.josm.gui.layer.AbstractMapViewPaintable;
@@ -65,6 +67,7 @@ import org.openstreetmap.josm.tools.ImageProvider;
 import org.openstreetmap.josm.tools.Logging;
 import org.openstreetmap.josm.tools.Pair;
 import org.openstreetmap.josm.tools.Shortcut;
+import org.openstreetmap.josm.tools.UserCancelException;
 
 /**
  * A special map mode that is optimized for improving way geometry.
@@ -78,6 +81,10 @@ public class ImproveWayAccuracyAction extends MapMode implements DataSelectionLi
 
     enum State {
         SELECTING, IMPROVING
+    }
+
+    enum Mode {
+        MOVE, ADD, DELETE, UNGLUE
     }
 
     private State state;
@@ -215,12 +222,15 @@ public class ImproveWayAccuracyAction extends MapMode implements DataSelectionLi
                 return tr("Select a way that you want to make more accurate.");
             }
         } else {
-            if (ctrl) {
+            Mode mode = getImproveMode();
+            if (mode == Mode.UNGLUE) {
+                return tr("Click to unglue and move  the highlighted node.");
+            } else if (mode == Mode.ADD) {
                 return tr("Click to add a new node. Release Ctrl to move existing nodes or hold Alt to delete.");
-            } else if (alt) {
+            } else if (mode == Mode.DELETE) {
                 return tr("Click to delete the highlighted node. Release Alt to move existing nodes or hold Ctrl to add new nodes.");
             } else {
-                return tr("Click to move the highlighted node. Hold Ctrl to add new nodes, or Alt to delete.");
+                return tr("Click to move the highlighted node. Hold Ctrl to add new nodes, Alt to delete, or Ctrl+Alt to move and unglue.");
             }
         }
     }
@@ -268,10 +278,12 @@ public class ImproveWayAccuracyAction extends MapMode implements DataSelectionLi
             // that is going to be moved.
             // Non-native highlighting is used here as well.
 
+            Mode mode = getImproveMode();
+
             // Finding endpoints
             Node p1 = null;
             Node p2 = null;
-            if (ctrl && candidateSegment != null) {
+            if (mode == Mode.ADD && candidateSegment != null) {
                 g.setStroke(ADD_NODE_STROKE.get());
                 try {
                     p1 = candidateSegment.getFirstNode();
@@ -279,7 +291,7 @@ public class ImproveWayAccuracyAction extends MapMode implements DataSelectionLi
                 } catch (ArrayIndexOutOfBoundsException e) {
                     Logging.error(e);
                 }
-            } else if (!alt && !ctrl && candidateNode != null) {
+            } else if ((mode == Mode.MOVE || mode == Mode.UNGLUE) && candidateNode != null) {
                 g.setStroke(MOVE_NODE_STROKE.get());
                 List<Pair<Node, Node>> wpps = targetWay.getNodePairs(false);
                 for (Pair<Node, Node> wpp : wpps) {
@@ -293,7 +305,7 @@ public class ImproveWayAccuracyAction extends MapMode implements DataSelectionLi
                         break;
                     }
                 }
-            } else if (alt && !ctrl && candidateNode != null) {
+            } else if (mode == Mode.DELETE && candidateNode != null) {
                 g.setStroke(DELETE_NODE_STROKE.get());
                 List<Node> nodes = targetWay.getNodes();
                 int index = nodes.indexOf(candidateNode);
@@ -312,7 +324,7 @@ public class ImproveWayAccuracyAction extends MapMode implements DataSelectionLi
 
             // Drawing preview lines
             MapViewPath b = new MapViewPath(mv);
-            if (alt && !ctrl) {
+            if (mode == Mode.DELETE) {
                 // In delete mode
                 if (p1 != null && p2 != null) {
                     b.moveTo(p1);
@@ -337,7 +349,7 @@ public class ImproveWayAccuracyAction extends MapMode implements DataSelectionLi
                 g.fill(new MapViewPath(mv).shapeAround(p1, SymbolShape.SQUARE, DOT_SIZE.get()));
             }
 
-            if (!alt && !ctrl && candidateNode != null) {
+            if (mode == Mode.MOVE && candidateNode != null) {
                 b.reset();
                 drawIntersectingWayHelperLines(mv, b);
                 g.setStroke(MOVE_NODE_INTERSECTING_STROKE.get());
@@ -430,15 +442,23 @@ public class ImproveWayAccuracyAction extends MapMode implements DataSelectionLi
                 updateStateByCurrentSelection();
             }
         } else if (state == State.IMPROVING) {
+            EastNorth cursorEN = mv.getEastNorth(mousePos.x, mousePos.y);
+
             // Checking if the new coordinate is outside of the world
-            if (new Node(mv.getEastNorth(mousePos.x, mousePos.y)).isOutSideWorld()) {
+            if (new Node(cursorEN).isOutSideWorld()) {
                 JOptionPane.showMessageDialog(MainApplication.getMainFrame(),
                         tr("Cannot add a node outside of the world."),
                         tr("Warning"), JOptionPane.WARNING_MESSAGE);
                 return;
             }
 
-            if (ctrl && !alt && candidateSegment != null) {
+            Mode mode = getImproveMode();
+
+            if (mode == Mode.UNGLUE && candidateNode != null && (candidateNode.getParentWays().stream().filter(Way::isUsable).count() < 2)) {
+                mode = Mode.MOVE;
+            }
+
+            if (mode == Mode.ADD && candidateSegment != null) {
                 // Add a new node to the highlighted segment.
                 Collection<WaySegment> virtualSegments = new LinkedList<>();
 
@@ -457,7 +477,7 @@ public class ImproveWayAccuracyAction extends MapMode implements DataSelectionLi
 
                 Collection<Command> virtualCmds = new LinkedList<>();
                 // Create the new node
-                Node virtualNode = new Node(mv.getEastNorth(mousePos.x, mousePos.y));
+                Node virtualNode = new Node(cursorEN);
                 virtualCmds.add(new AddCommand(ds, virtualNode));
 
                 // Adding the node to all segments found
@@ -475,7 +495,7 @@ public class ImproveWayAccuracyAction extends MapMode implements DataSelectionLi
 
                 UndoRedoHandler.getInstance().add(new SequenceCommand(text, virtualCmds));
 
-            } else if (alt && !ctrl && candidateNode != null) {
+            } else if (mode == Mode.DELETE && candidateNode != null) {
                 // Deleting the highlighted node
 
                 //check to see if node is in use by more than one object
@@ -504,10 +524,38 @@ public class ImproveWayAccuracyAction extends MapMode implements DataSelectionLi
                     }
                 }
 
+            } else if (mode == Mode.UNGLUE && candidateNode != null) {
+                // Unglue and move the highlighted node
+                try {
+                    UnGlueAction unglueAction = MainApplication.getMenu().unglueNodes;
+                    unglueAction.checkAndConfirmOutlyingUnglue(null, candidateNode);
+
+                    List<Command> cmds = new ArrayList<>();
+                    List<Node> newNodes = unglueAction.unglueWays(targetWay, candidateNode, cmds);
+                    if (newNodes.size() == 1) {
+                        Node newNode = newNodes.get(0);
+                        newNode.setEastNorth(cursorEN);
+                        double moveDistance = candidateNode.greatCircleDistance(newNode);
+
+                        boolean preventMove = SelectAction.checkMoveForLargeDistance(1, moveDistance, false);
+                        if (!preventMove)
+                            UndoRedoHandler.getInstance().add(new SequenceCommand(tr("Unglue and move node"), cmds));
+                    } else {
+                        // TODO: should never happen -> log error instead
+                        JOptionPane.showMessageDialog(MainApplication.getMainFrame(),
+                            tr("Unexpected number of unglued nodes"),
+                            tr("Error"), JOptionPane.ERROR_MESSAGE);
+                    }
+                } catch (UserCancelException ex) {
+                    new Notification(
+                        tr("Unglue + move canceled"))
+                        .setIcon(JOptionPane.ERROR_MESSAGE)
+                        .setDuration(Notification.TIME_SHORT)
+                        .show();
+                }
             } else if (candidateNode != null) {
                 // Moving the highlighted node
                 EastNorth nodeEN = candidateNode.getEastNorth();
-                EastNorth cursorEN = mv.getEastNorth(mousePos.x, mousePos.y);
 
                 UndoRedoHandler.getInstance().add(
                         new MoveCommand(candidateNode, cursorEN.east() - nodeEN.east(), cursorEN.north() - nodeEN.north()));
@@ -550,18 +598,17 @@ public class ImproveWayAccuracyAction extends MapMode implements DataSelectionLi
             mv.setNewCursor(targetWay == null ? cursorSelect
                     : cursorSelectHover, this);
         } else if (state == State.IMPROVING) {
-            if (alt && !ctrl) {
+            Mode mode = getImproveMode();
+            boolean lock = shift || dragging;
+
+            if (mode == Mode.DELETE) {
                 mv.setNewCursor(cursorImproveDelete, this);
-            } else if (shift || dragging) {
-                if (ctrl) {
-                    mv.setNewCursor(cursorImproveAddLock, this);
-                } else {
-                    mv.setNewCursor(cursorImproveLock, this);
-                }
-            } else if (ctrl && !alt) {
-                mv.setNewCursor(cursorImproveAdd, this);
+            } else if (mode == Mode.ADD) {
+                mv.setNewCursor(lock ? cursorImproveAddLock : cursorImproveAdd, this);
+            } else if (mode == Mode.UNGLUE) {
+                mv.setNewCursor(lock ? cursorImproveLock : cursorImprove, this);
             } else {
-                mv.setNewCursor(cursorImprove, this);
+                mv.setNewCursor(lock ? cursorImproveLock : cursorImprove, this);
             }
         }
     }
@@ -571,7 +618,8 @@ public class ImproveWayAccuracyAction extends MapMode implements DataSelectionLi
      * candidateSegment
      */
     public void updateCursorDependentObjectsIfNeeded() {
-        if (state == State.IMPROVING && (shift || dragging)
+        boolean lock = shift || dragging;
+        if (state == State.IMPROVING && lock
                 && !(candidateNode == null && candidateSegment == null)) {
             return;
         }
@@ -585,7 +633,8 @@ public class ImproveWayAccuracyAction extends MapMode implements DataSelectionLi
         if (state == State.SELECTING) {
             targetWay = ImproveWayAccuracyHelper.findWay(mv, mousePos);
         } else if (state == State.IMPROVING) {
-            if (ctrl && !alt) {
+            Mode mode = getImproveMode();
+            if (mode == Mode.ADD) {
                 candidateSegment = ImproveWayAccuracyHelper.findCandidateSegment(mv,
                         targetWay, mousePos);
                 candidateNode = null;
@@ -673,6 +722,17 @@ public class ImproveWayAccuracyAction extends MapMode implements DataSelectionLi
 
         // Starting selecting by default
         startSelecting();
+    }
+
+    private Mode getImproveMode() {
+        if (ctrl && !alt)
+            return Mode.ADD;
+        else if (!ctrl && alt)
+            return Mode.DELETE;
+        else if (ctrl && alt)
+            return Mode.UNGLUE;
+        else
+            return Mode.MOVE;
     }
 
     @Override
