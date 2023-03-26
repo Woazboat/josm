@@ -82,14 +82,17 @@ public class UnGlueAction extends JosmAction {
     }
 
     protected void unglue() throws UserCancelException {
+        unglue(getLayerManager().getEditDataSet().getSelected());
+    }
 
-        Collection<OsmPrimitive> selection = getLayerManager().getEditDataSet().getSelected();
-
+    protected void unglue(Collection<OsmPrimitive> selection) throws UserCancelException {
         String errMsg = null;
         int errorTime = Notification.TIME_DEFAULT;
 
+        Point currMousePos = MainApplication.getMap().mapView.getMousePosition();
+
         if (checkSelectionOneNodeAtMostOneWay(selection)) {
-            checkAndConfirmOutlyingUnglue();
+            checkAndConfirmOutlyingUnglue(selectedNodes, selectedNode);
             List<Way> parentWays = selectedNode.getParentWays().stream().filter(Way::isUsable).collect(Collectors.toList());
 
             if (parentWays.size() < 2) {
@@ -101,10 +104,10 @@ public class UnGlueAction extends JosmAction {
                     final PropertiesMembershipChoiceDialog dialog = PropertiesMembershipChoiceDialog.showIfNecessary(
                             Collections.singleton(selectedNode), !selectedNode.isTagged());
                     if (dialog != null && dialog.getTags().isPresent()) {
-                        unglueOneNodeAtMostOneWay(way, dialog);
+                        unglueOneNodeAtMostOneWay(way, selectedNode, currMousePos, dialog);
                         return;
                     } else if (closedOrSelfCrossing) {
-                        unglueClosedOrSelfCrossingWay(way, dialog);
+                        unglueClosedOrSelfCrossingWay(way, selectedNode, dialog);
                         return;
                     }
                 }
@@ -112,10 +115,10 @@ public class UnGlueAction extends JosmAction {
                 errMsg = tr("This node is not glued to anything else.");
             } else {
                 // and then do the work.
-                unglueWays();
+                unglueWays(selectedWay, selectedNode);
             }
         } else if (checkSelectionOneWayAnyNodes(selection)) {
-            checkAndConfirmOutlyingUnglue();
+            checkAndConfirmOutlyingUnglue(selectedNodes, selectedNode);
             selectedNodes.removeIf(n -> n.getParentWays().stream().filter(Way::isUsable).count() < 2);
             if (selectedNodes.isEmpty()) {
                 if (selection.size() > 1) {
@@ -125,10 +128,10 @@ public class UnGlueAction extends JosmAction {
                 }
             } else if (selectedNodes.size() == 1) {
                 selectedNode = selectedNodes.iterator().next();
-                unglueWays();
+                unglueWays(selectedWay, selectedNode);
             } else {
                 // and then do the work.
-                unglueOneWayAnyNodes();
+                unglueOneWayAnyNodes(selectedWay, selectedNodes);
             }
         } else {
             errorTime = Notification.TIME_VERY_LONG;
@@ -169,6 +172,7 @@ public class UnGlueAction extends JosmAction {
 
     private static void updateProperties(ExistingBothNew tags, Node existingNode, Iterable<Node> newNodes, List<Command> cmds) {
         if (ExistingBothNew.NEW == tags) {
+            // Remove all tags from existing node
             final Node newSelectedNode = new Node(existingNode);
             newSelectedNode.removeAll();
             cmds.add(new ChangeCommand(existingNode, newSelectedNode));
@@ -183,26 +187,27 @@ public class UnGlueAction extends JosmAction {
      * Assumes there is one tagged Node stored in selectedNode that it will try to unglue.
      * (i.e. copy node and remove all tags from the old one.)
      * @param way way to modify
+     * @param node node to unglue
+     * @param newPos new position for unglued node
      * @param dialog the user dialog
      */
-    private void unglueOneNodeAtMostOneWay(Way way, PropertiesMembershipChoiceDialog dialog) {
+    private void unglueOneNodeAtMostOneWay(Way way, Node node, Point newPos, PropertiesMembershipChoiceDialog dialog) {
         List<Command> cmds = new ArrayList<>();
         List<Node> newNodes = new ArrayList<>();
-        cmds.add(new ChangeNodesCommand(way, modifyWay(selectedNode, way, cmds, newNodes)));
+        cmds.add(new ChangeNodesCommand(way, modifyWay(node, way, cmds, newNodes)));
         if (dialog != null) {
-            update(dialog, selectedNode, newNodes, cmds);
+            update(dialog, node, newNodes, cmds);
         }
 
         // Place the selected node where the cursor is or some pixels above
         MapView mv = MainApplication.getMap().mapView;
-        Point currMousePos = mv.getMousePosition();
-        if (currMousePos != null) {
-            cmds.add(new MoveCommand(selectedNode, mv.getLatLon(currMousePos.getX(), currMousePos.getY())));
+        if (newPos != null) {
+            cmds.add(new MoveCommand(node, mv.getLatLon(newPos.getX(), newPos.getY())));
         } else {
-            cmds.add(new MoveCommand(selectedNode, 0, 5));
+            cmds.add(new MoveCommand(node, 0, 5));
         }
         UndoRedoHandler.getInstance().add(new SequenceCommand(tr("Unglued Node"), cmds));
-        getLayerManager().getEditDataSet().setSelected(selectedNode);
+        getLayerManager().getEditDataSet().setSelected(node);
     }
 
     /**
@@ -227,16 +232,25 @@ public class UnGlueAction extends JosmAction {
         selectedNode = null;
         selectedWay = null;
 
+        Node n = null;
+        Way w = null;
+
         for (OsmPrimitive p : selection) {
             if (p instanceof Node) {
-                selectedNode = (Node) p;
-                if (size == 1 || (selectedWay != null && selectedWay.containsNode(selectedNode)))
-                    return true;
+                if (n != null)
+                    return false;
+                n = (Node) p;
             } else if (p instanceof Way) {
-                selectedWay = (Way) p;
-                if (size == 2 && selectedNode != null)
-                    return selectedWay.containsNode(selectedNode);
+                if (w != null)
+                    return false;
+                w = (Way) p;
             }
+        }
+
+        if (n != null && (w == null || w.containsNode(n))) {
+            selectedNode = n;
+            selectedWay = w;
+            return true;
         }
 
         return false;
@@ -355,20 +369,30 @@ public class UnGlueAction extends JosmAction {
         }
     }
 
+    private void unglueWays(Way way, Node node) throws UserCancelException {
+        List<Command> cmds = new ArrayList<>();
+        List<Node> newNodes = unglueWays(way, node, cmds);
+
+        execCommands(cmds, newNodes);
+    }
+
     /**
      * dupe a single node into as many nodes as there are ways using it, OR
      *
      * dupe a single node once, and put the copy on the selected way
+     * @param way parent way of the node to unglue
+     * @param node the node to unglue
+     * @param cmds command list to add new commands to
+     * @return list of new duplicated nodes
      * @throws UserCancelException if user cancels choice
      */
-    private void unglueWays() throws UserCancelException {
+    public List<Node> unglueWays(Way way, Node node, List<Command> cmds) throws UserCancelException {
         final PropertiesMembershipChoiceDialog dialog = PropertiesMembershipChoiceDialog
-                .showIfNecessary(Collections.singleton(selectedNode), false);
-        List<Command> cmds = new ArrayList<>();
+                .showIfNecessary(Collections.singleton(node), false);
         List<Node> newNodes = new ArrayList<>();
         List<Way> parentWays;
-        if (selectedWay == null) {
-            parentWays = selectedNode.referrers(Way.class).filter(Way::isUsable).collect(Collectors.toList());
+        if (way == null) {
+            parentWays = node.referrers(Way.class).filter(Way::isUsable).collect(Collectors.toList());
             // see #5452 and #18670
             parentWays.sort((o1, o2) -> {
                 int d = Boolean.compare(!o1.isNew() && !o1.isModified(), !o2.isNew() && !o2.isModified());
@@ -376,28 +400,28 @@ public class UnGlueAction extends JosmAction {
                     d = Integer.compare(o2.getReferrers().size(), o1.getReferrers().size()); // reversed
                 }
                 if (d == 0) {
-                    d = Boolean.compare(o1.isFirstLastNode(selectedNode), o2.isFirstLastNode(selectedNode));
+                    d = Boolean.compare(o1.isFirstLastNode(node), o2.isFirstLastNode(node));
                 }
                 return d;
             });
             // first way should not be changed, preferring older ways and those with fewer parents
             parentWays.remove(0);
         } else {
-            parentWays = Collections.singletonList(selectedWay);
+            parentWays = Collections.singletonList(way);
         }
         Set<Way> warnParents = new HashSet<>();
         for (Way w : parentWays) {
-            if (w.isFirstLastNode(selectedNode))
+            if (w.isFirstLastNode(node))
                 warnParents.add(w);
-            cmds.add(new ChangeNodesCommand(w, modifyWay(selectedNode, w, cmds, newNodes)));
+            cmds.add(new ChangeNodesCommand(w, modifyWay(node, w, cmds, newNodes)));
         }
 
         if (dialog != null) {
-            update(dialog, selectedNode, newNodes, cmds);
+            update(dialog, node, newNodes, cmds);
         }
-        notifyWayPartOfRelation(warnParents);
+        notifyWayPartOfRelation(warnParents, selectedNodes, node);
 
-        execCommands(cmds, newNodes);
+        return newNodes;
     }
 
     /**
@@ -416,10 +440,11 @@ public class UnGlueAction extends JosmAction {
      * Duplicates a node used several times by the same way. See #9896.
      * First occurrence is kept. A closed way will be "opened" when the closing node is unglued.
      * @param way way to modify
+     * @param node node to unglue
      * @param dialog user dialog, might be null
      * @return true if action is OK false if there is nothing to do
      */
-    private boolean unglueClosedOrSelfCrossingWay(Way way, PropertiesMembershipChoiceDialog dialog) {
+    private boolean unglueClosedOrSelfCrossingWay(Way way, Node node, PropertiesMembershipChoiceDialog dialog) {
         // According to previous check, only one valid way through that node
         List<Command> cmds = new ArrayList<>();
         List<Node> oldNodes = way.getNodes();
@@ -427,37 +452,39 @@ public class UnGlueAction extends JosmAction {
         List<Node> addNodes = new ArrayList<>();
         int count = 0;
         for (Node n: oldNodes) {
-            if (n == selectedNode && count++ > 0) {
-                n = cloneNode(selectedNode, cmds);
+            if (n == node && count++ > 0) {
+                n = cloneNode(node, cmds);
                 addNodes.add(n);
             }
             newNodes.add(n);
         }
         if (addNodes.isEmpty()) {
-            // selectedNode doesn't need unglue
+            // node doesn't need unglue
             return false;
         }
         if (dialog != null) {
-            update(dialog, selectedNode, addNodes, cmds);
+            update(dialog, node, addNodes, cmds);
         }
-        addCheckedChangeNodesCmd(cmds, way, newNodes);
+        addCheckedChangeNodesCmd(cmds, way, newNodes, selectedNodes);
         execCommands(cmds, addNodes);
         return true;
     }
 
     /**
      * dupe all nodes that are selected, and put the copies on the selected way
+     * @param way selected way to modify
+     * @param nodes nodes to unglue
      * @throws UserCancelException if user cancels choice
      */
-    private void unglueOneWayAnyNodes() throws UserCancelException {
+    private void unglueOneWayAnyNodes(Way way, Set<Node> nodes) throws UserCancelException {
         final PropertiesMembershipChoiceDialog dialog =
-            PropertiesMembershipChoiceDialog.showIfNecessary(selectedNodes, false);
+            PropertiesMembershipChoiceDialog.showIfNecessary(nodes, false);
 
         Map<Node, Node> replaced = new HashMap<>();
         List<Command> cmds = new ArrayList<>();
 
-        selectedNodes.forEach(n -> replaced.put(n, cloneNode(n, cmds)));
-        List<Node> modNodes = new ArrayList<>(selectedWay.getNodes());
+        nodes.forEach(n -> replaced.put(n, cloneNode(n, cmds)));
+        List<Node> modNodes = new ArrayList<>(way.getNodes());
         modNodes.replaceAll(n -> replaced.getOrDefault(n, n));
 
         if (dialog != null) {
@@ -465,18 +492,18 @@ public class UnGlueAction extends JosmAction {
         }
 
         // only one changeCommand for a way, else garbage will happen
-        addCheckedChangeNodesCmd(cmds, selectedWay, modNodes);
+        addCheckedChangeNodesCmd(cmds, way, modNodes, nodes);
         UndoRedoHandler.getInstance().add(new SequenceCommand(
                 trn("Dupe {0} node into {1} nodes", "Dupe {0} nodes into {1} nodes",
-                        selectedNodes.size(), selectedNodes.size(), 2 * selectedNodes.size()), cmds));
+                nodes.size(), nodes.size(), 2 * nodes.size()), cmds));
         getLayerManager().getEditDataSet().setSelected(replaced.values());
     }
 
-    private boolean addCheckedChangeNodesCmd(List<Command> cmds, Way w, List<Node> nodes) {
-        boolean relationCheck = !calcAffectedRelations(Collections.singleton(w)).isEmpty();
-        cmds.add(new ChangeNodesCommand(w, nodes));
+    private boolean addCheckedChangeNodesCmd(List<Command> cmds, Way w, List<Node> newNodes, Set<Node> selectedNodes) {
+        boolean relationCheck = !calcAffectedRelations(Collections.singleton(w), selectedNodes, selectedNode).isEmpty();
+        cmds.add(new ChangeNodesCommand(w, newNodes));
         if (relationCheck) {
-            notifyWayPartOfRelation(Collections.singleton(w));
+            notifyWayPartOfRelation(Collections.singleton(w), selectedNodes, selectedNode);
         }
         return relationCheck;
     }
@@ -491,7 +518,7 @@ public class UnGlueAction extends JosmAction {
         updateEnabledStateOnModifiableSelection(selection);
     }
 
-    protected void checkAndConfirmOutlyingUnglue() throws UserCancelException {
+    public void checkAndConfirmOutlyingUnglue(Set<Node> selectedNodes, Node selectedNode) throws UserCancelException {
         List<OsmPrimitive> primitives = new ArrayList<>(2 + (selectedNodes == null ? 0 : selectedNodes.size()));
         if (selectedNodes != null)
             primitives.addAll(selectedNodes);
@@ -514,8 +541,8 @@ public class UnGlueAction extends JosmAction {
         }
     }
 
-    protected void notifyWayPartOfRelation(final Collection<Way> ways) {
-        Set<Relation> affectedRelations = calcAffectedRelations(ways);
+    protected void notifyWayPartOfRelation(final Collection<Way> ways, Set<Node> selectedNodes, Node selectedNode) {
+        Set<Relation> affectedRelations = calcAffectedRelations(ways, selectedNodes, selectedNode);
         if (affectedRelations.isEmpty()) {
             return;
         }
@@ -527,7 +554,7 @@ public class UnGlueAction extends JosmAction {
         new Notification(msg1 + msg2).setIcon(JOptionPane.WARNING_MESSAGE).show();
     }
 
-    protected Set<Relation> calcAffectedRelations(final Collection<Way> ways) {
+    protected Set<Relation> calcAffectedRelations(final Collection<Way> ways, Set<Node> selectedNodes, Node selectedNode) {
         final Set<Node> affectedNodes = (selectedNodes != null) ? selectedNodes : Collections.singleton(selectedNode);
         return OsmPrimitive.getParentRelations(ways)
                 .stream().filter(r -> isRelationAffected(r, affectedNodes, ways))
